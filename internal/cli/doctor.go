@@ -15,42 +15,42 @@ func newDoctorCmd() *cobra.Command {
 		Use:   "doctor",
 		Short: "Compare recorded workspaces with git and the filesystem",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := loadService()
+			c := newContainer(cmd)
+			doctor, err := c.doctor()
 			if err != nil {
 				return err
 			}
-			issues, err := svc.Doctor()
+			issues, err := doctor.Diagnose()
 			if err != nil {
 				return err
 			}
 			if fix {
-				if err := svc.Fix(issues); err != nil {
-					return err
-				}
-				issues, err = svc.Doctor()
+				repairer, err := c.repairer()
 				if err != nil {
 					return err
 				}
+				if err := repairer.Repair(issues); err != nil {
+					return err
+				}
+				// Re-diagnose so the report shows what the repair left.
+				if issues, err = doctor.Diagnose(); err != nil {
+					return err
+				}
 			}
-			if asJSON {
-				return printJSON(issues)
+
+			presenter := presenterFor(cmd, asJSON)
+			if err := presenter.Issues(issues); err != nil {
+				return err
 			}
-			if len(issues) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "all workspaces healthy")
+			// A machine-readable run puts the findings in the payload; only
+			// the human-facing run turns them into a failing exit status.
+			if presenter.MachineReadable() || len(issues) == 0 {
 				return nil
 			}
-			rows := make([][]string, 0, len(issues))
-			for _, issue := range issues {
-				rows = append(rows, []string{issue.Workspace, issue.Repo, issue.Issue, issue.Action})
-			}
-			printTable([]string{"WORKSPACE", "REPO", "ISSUE", "ACTION"}, rows)
-			if !fix {
-				return fmt.Errorf("doctor found %d issue(s)", len(issues))
-			}
-			if len(issues) > 0 {
+			if fix {
 				return fmt.Errorf("doctor still reports %d issue(s)", len(issues))
 			}
-			return nil
+			return fmt.Errorf("doctor found %d issue(s)", len(issues))
 		},
 	}
 	cmd.Flags().BoolVarP(&asJSON, "json", "j", false, "print JSON")

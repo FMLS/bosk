@@ -1,16 +1,12 @@
+// Package cli wires bosk's use cases to cobra commands. It is the only package
+// that names a concrete adapter.
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"strings"
-	"text/tabwriter"
 
-	"github.com/FMLS/bosk/internal/config"
-	"github.com/FMLS/bosk/internal/models"
-	"github.com/FMLS/bosk/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -49,33 +45,7 @@ func newRoot() *cobra.Command {
 	return cmd
 }
 
-func loadService() (*workspace.Service, error) {
-	cfg, err := config.Require()
-	if err != nil {
-		return nil, err
-	}
-	svc := workspace.New(cfg)
-	svc.Warn = func(msg string) {
-		fmt.Fprintln(os.Stderr, "warning:", msg)
-	}
-	return svc, nil
-}
-
-func printJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
-}
-
-func printTable(headers []string, rows [][]string) {
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, strings.Join(headers, "\t"))
-	for _, row := range rows {
-		fmt.Fprintln(w, strings.Join(row, "\t"))
-	}
-	w.Flush()
-}
-
+// splitCSV parses a comma-separated flag value, dropping blanks.
 func splitCSV(v string) []string {
 	if strings.TrimSpace(v) == "" {
 		return nil
@@ -91,14 +61,10 @@ func splitCSV(v string) []string {
 	return out
 }
 
-func confirm(r io.Reader, w io.Writer, prompt string) bool {
-	fmt.Fprint(w, prompt)
-	var answer string
-	_, _ = fmt.Fscanln(r, &answer)
-	answer = strings.ToLower(strings.TrimSpace(answer))
-	return answer == "y" || answer == "yes"
-}
-
-func formatWorkspace(ws models.Workspace) []string {
-	return []string{ws.Name, ws.Branch, fmt.Sprintf("%d", len(ws.Repos)), ws.Path}
+// firstArg returns the optional positional argument.
+func firstArg(args []string) string {
+	if len(args) == 1 {
+		return args[0]
+	}
+	return ""
 }

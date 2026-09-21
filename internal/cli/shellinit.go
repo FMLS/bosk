@@ -26,6 +26,8 @@ func newShellInitCmd() *cobra.Command {
 		Use:   "shell-init",
 		Short: "Print shell integration so `bosk go` can change directory",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// A fixed snippet, not a rendered result: there is nothing for a
+			// presenter to decide.
 			fmt.Fprint(cmd.OutOrStdout(), shellInit)
 			return nil
 		},

@@ -160,3 +160,87 @@ func TestIssueRenderingAndFixability(t *testing.T) {
 		}
 	}
 }
+
+func TestWithoutReposDropsNamedReposWithoutMutatingTheOriginal(t *testing.T) {
+	ws := Workspace{Name: "w", Repos: []RepoWorktree{{RepoName: "a"}, {RepoName: "b"}, {RepoName: "c"}}}
+
+	got := ws.WithoutRepos([]string{"b", "missing"})
+
+	if len(got.Repos) != 2 || got.Repos[0].RepoName != "a" || got.Repos[1].RepoName != "c" {
+		t.Fatalf("got = %#v", got.Repos)
+	}
+	if len(ws.Repos) != 3 || ws.Repos[1].RepoName != "b" {
+		t.Errorf("original was mutated: %#v", ws.Repos)
+	}
+}
+
+func TestWorkspaceHasMemberCoversReposAndShared(t *testing.T) {
+	ws := Workspace{
+		Name:   "w",
+		Repos:  []RepoWorktree{{RepoName: "a"}},
+		Shared: []SharedRepo{{RepoName: "lib"}},
+	}
+
+	for _, name := range []string{"a", "lib"} {
+		if !ws.HasMember(name) {
+			t.Errorf("HasMember(%q) = false", name)
+		}
+	}
+	if ws.HasMember("other") {
+		t.Error(`HasMember("other") = true`)
+	}
+}
+
+func TestWithSharedAppendsWithoutTouchingTheReceiver(t *testing.T) {
+	ws := Workspace{Name: "w", Repos: []RepoWorktree{{RepoName: "a"}}, Shared: []SharedRepo{{RepoName: "x"}}}
+
+	got, err := ws.WithShared([]SharedRepo{{RepoName: "lib"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got.Shared) != 2 || got.Shared[1].RepoName != "lib" {
+		t.Fatalf("shared = %#v", got.Shared)
+	}
+	if len(ws.Shared) != 1 {
+		t.Fatalf("receiver changed: %#v", ws.Shared)
+	}
+}
+
+func TestWithSharedRefusesANameTheWorkspaceUses(t *testing.T) {
+	ws := Workspace{Name: "w", Repos: []RepoWorktree{{RepoName: "a"}}, Shared: []SharedRepo{{RepoName: "x"}}}
+
+	for _, name := range []string{"a", "x"} {
+		if _, err := ws.WithShared([]SharedRepo{{RepoName: name}}); err == nil {
+			t.Errorf("WithShared(%q) = nil, want error", name)
+		}
+	}
+	if _, err := ws.WithShared([]SharedRepo{{RepoName: "n"}, {RepoName: "n"}}); err == nil {
+		t.Error("the same new name twice should be refused")
+	}
+}
+
+func TestWithoutSharedDropsOnlyTheNamedLinks(t *testing.T) {
+	ws := Workspace{Shared: []SharedRepo{{RepoName: "x"}, {RepoName: "y"}}}
+
+	got := ws.WithoutShared([]string{"x"})
+
+	if len(got.Shared) != 1 || got.Shared[0].RepoName != "y" {
+		t.Fatalf("shared = %#v", got.Shared)
+	}
+	if len(ws.Shared) != 2 {
+		t.Fatalf("receiver changed: %#v", ws.Shared)
+	}
+}
+
+func TestValidateDisjoint(t *testing.T) {
+	if err := ValidateDisjoint([]string{"a", "b"}, []string{"c"}); err != nil {
+		t.Errorf("disjoint sets: %v", err)
+	}
+	if err := ValidateDisjoint([]string{"a", "b"}, []string{"b"}); err == nil {
+		t.Error("overlapping sets should be refused")
+	}
+	if err := ValidateDisjoint(nil, nil); err != nil {
+		t.Errorf("empty sets: %v", err)
+	}
+}

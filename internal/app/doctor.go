@@ -48,7 +48,39 @@ func (d *Doctor) workspaceIssues(ws domain.Workspace) []domain.Issue {
 			issues = append(issues, issue)
 		}
 	}
+	for _, shared := range ws.Shared {
+		if issue, ok := d.sharedIssue(ws, shared); ok {
+			issues = append(issues, issue)
+		}
+	}
 	return issues
+}
+
+// sharedIssue checks one shared repository: its source must still be a
+// repository, and the workspace must hold a symlink to exactly that source.
+func (d *Doctor) sharedIssue(ws domain.Workspace, shared domain.SharedRepo) (domain.Issue, bool) {
+	base := domain.Issue{Workspace: ws.Name, Repo: shared.RepoName, Path: shared.LinkPath, Target: shared.SourceRepo}
+
+	if !d.git.IsRepo(shared.SourceRepo) {
+		base.Kind = domain.IssueSharedSourceMissing
+		base.Path = shared.SourceRepo
+		return base, true
+	}
+	exists, err := d.fs.LinkExists(shared.LinkPath)
+	if err != nil || !exists {
+		base.Kind = domain.IssueSharedLinkMissing
+		return base, true
+	}
+	target, err := d.fs.Readlink(shared.LinkPath)
+	if err != nil {
+		base.Kind = domain.IssueSharedLinkNotSymlink
+		return base, true
+	}
+	if filepath.Clean(target) != filepath.Clean(shared.SourceRepo) {
+		base.Kind = domain.IssueSharedLinkMismatch
+		return base, true
+	}
+	return domain.Issue{}, false
 }
 
 func (d *Doctor) repoIssue(ws domain.Workspace, repo domain.RepoWorktree) (domain.Issue, bool) {

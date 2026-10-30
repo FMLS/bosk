@@ -15,6 +15,7 @@ import (
 type MemFS struct {
 	dirs  map[string]bool
 	files map[string]bool
+	links map[string]string
 
 	Cwd string
 
@@ -22,6 +23,7 @@ type MemFS struct {
 	RenameErr map[string]error
 	RemoveErr map[string]error
 	StatErr   map[string]error
+	LinkErr   map[string]error
 }
 
 // NewMemFS returns an empty filesystem with the given working directory.
@@ -29,11 +31,13 @@ func NewMemFS(cwd string) *MemFS {
 	fs := &MemFS{
 		dirs:      map[string]bool{},
 		files:     map[string]bool{},
+		links:     map[string]string{},
 		Cwd:       cwd,
 		MkdirErr:  map[string]error{},
 		RenameErr: map[string]error{},
 		RemoveErr: map[string]error{},
 		StatErr:   map[string]error{},
+		LinkErr:   map[string]error{},
 	}
 	if cwd != "" {
 		fs.AddDir(cwd)
@@ -59,9 +63,19 @@ func (fs *MemFS) AddFile(path string) {
 	fs.files[clean] = true
 }
 
+// AddLink creates a symbolic link and its parent directories.
+func (fs *MemFS) AddLink(target, link string) {
+	clean := filepath.Clean(link)
+	fs.AddDir(filepath.Dir(clean))
+	fs.links[clean] = target
+}
+
 // Paths returns every known path, sorted.
 func (fs *MemFS) Paths() []string {
-	out := make([]string, 0, len(fs.dirs)+len(fs.files))
+	out := make([]string, 0, len(fs.dirs)+len(fs.files)+len(fs.links))
+	for p := range fs.links {
+		out = append(out, p)
+	}
 	for p := range fs.dirs {
 		out = append(out, p)
 	}
@@ -77,7 +91,18 @@ func (fs *MemFS) Exists(path string) (bool, error) {
 	if err := fs.StatErr[clean]; err != nil {
 		return false, err
 	}
-	return fs.dirs[clean] || fs.files[clean], nil
+	return fs.dirs[clean] || fs.files[clean] || fs.linkResolves(clean), nil
+}
+
+// linkResolves reports whether path is a symbolic link whose target exists, the
+// way os.Stat follows a link.
+func (fs *MemFS) linkResolves(path string) bool {
+	target, ok := fs.links[path]
+	if !ok {
+		return false
+	}
+	target = filepath.Clean(target)
+	return fs.dirs[target] || fs.files[target]
 }
 
 func (fs *MemFS) IsDir(path string) (bool, error) {
@@ -85,7 +110,7 @@ func (fs *MemFS) IsDir(path string) (bool, error) {
 	if err := fs.StatErr[clean]; err != nil {
 		return false, err
 	}
-	return fs.dirs[clean], nil
+	return fs.dirs[clean] || (fs.linkResolves(clean) && fs.dirs[filepath.Clean(fs.links[clean])]), nil
 }
 
 func (fs *MemFS) MkdirAll(path string) error {
@@ -103,7 +128,7 @@ func (fs *MemFS) Rename(oldPath, newPath string) error {
 	if err := fs.RenameErr[from]; err != nil {
 		return err
 	}
-	if !fs.dirs[from] && !fs.files[from] {
+	if _, isLink := fs.links[from]; !fs.dirs[from] && !fs.files[from] && !isLink {
 		return fmt.Errorf("rename %s: no such file or directory", from)
 	}
 	move := func(set map[string]bool) {
@@ -112,6 +137,12 @@ func (fs *MemFS) Rename(oldPath, newPath string) error {
 				delete(set, p)
 				set[to+strings.TrimPrefix(p, from)] = true
 			}
+		}
+	}
+	for p, target := range fs.links {
+		if p == from || strings.HasPrefix(p, from+string(filepath.Separator)) {
+			delete(fs.links, p)
+			fs.links[to+strings.TrimPrefix(p, from)] = target
 		}
 	}
 	move(fs.dirs)
@@ -134,6 +165,13 @@ func (fs *MemFS) RemoveAll(path string) error {
 	}
 	drop(fs.dirs)
 	drop(fs.files)
+	// Links are dropped by name only: their targets are never touched, which is
+	// how os.RemoveAll treats a symbolic link.
+	for p := range fs.links {
+		if p == clean || strings.HasPrefix(p, clean+string(filepath.Separator)) {
+			delete(fs.links, p)
+		}
+	}
 	return nil
 }
 
@@ -161,6 +199,11 @@ func (fs *MemFS) list(path string, dirsOnly bool) ([]string, error) {
 	collect(fs.dirs)
 	if !dirsOnly {
 		collect(fs.files)
+		for p := range fs.links {
+			if filepath.Dir(p) == clean {
+				seen[filepath.Base(p)] = true
+			}
+		}
 	}
 	out := make([]string, 0, len(seen))
 	for name := range seen {
@@ -168,6 +211,40 @@ func (fs *MemFS) list(path string, dirsOnly bool) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func (fs *MemFS) Symlink(target, link string) error {
+	clean := filepath.Clean(link)
+	if err := fs.LinkErr[clean]; err != nil {
+		return err
+	}
+	if fs.dirs[clean] || fs.files[clean] {
+		return fmt.Errorf("symlink %s: file exists", clean)
+	}
+	if _, ok := fs.links[clean]; ok {
+		return fmt.Errorf("symlink %s: file exists", clean)
+	}
+	fs.AddLink(target, clean)
+	return nil
+}
+
+func (fs *MemFS) Readlink(link string) (string, error) {
+	clean := filepath.Clean(link)
+	target, ok := fs.links[clean]
+	if !ok {
+		return "", fmt.Errorf("readlink %s: not a symbolic link", clean)
+	}
+	return target, nil
+}
+
+// LinkExists reports whether path exists itself, without following a link.
+func (fs *MemFS) LinkExists(path string) (bool, error) {
+	clean := filepath.Clean(path)
+	if err := fs.StatErr[clean]; err != nil {
+		return false, err
+	}
+	_, isLink := fs.links[clean]
+	return fs.dirs[clean] || fs.files[clean] || isLink, nil
 }
 
 func (fs *MemFS) Getwd() (string, error) {

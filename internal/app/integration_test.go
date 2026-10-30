@@ -299,3 +299,77 @@ func TestIntegrationWorktreeUnregisteredIsReportedAndFixable(t *testing.T) {
 		t.Fatal("the repaired workspace should be out of the registry")
 	}
 }
+
+func TestIntegrationAddExtendsAWorkspace(t *testing.T) {
+	h := newRealHarness(t)
+	ws, err := h.creator.Create(app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ws, added, err := h.creator.Add(app.AddOpts{Name: ws.Name, RepoNames: []string{"svc-b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(added.Repos) != 1 || len(ws.Repos) != 2 {
+		t.Fatalf("added = %#v, repos = %#v", added, ws.Repos)
+	}
+	cur, err := h.git.CurrentBranch(added.Repos[0].WorktreePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur != "feat/login" {
+		t.Fatalf("svc-b branch = %s", cur)
+	}
+	statuses := h.inspector.Status(ws)
+	if len(statuses) != 2 || statuses[1].Repo != "svc-b" || statuses[1].Error != "" {
+		t.Fatalf("status = %#v", statuses)
+	}
+
+	if err := h.remover.Delete(ws.Name, app.DeleteOpts{DeleteBranch: true}); err != nil {
+		t.Fatal(err)
+	}
+	if h.git.BranchExists(h.srcB, "feat/login") {
+		t.Fatal("delete should remove the branch add created")
+	}
+	if _, err := os.Stat(ws.Path); !os.IsNotExist(err) {
+		t.Fatalf("workspace directory should be gone, stat err = %v", err)
+	}
+}
+
+func TestIntegrationRemoveReposDropsOneWorktree(t *testing.T) {
+	h := newRealHarness(t)
+	ws, err := h.creator.Create(app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a", "svc-b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := ws.Repos[1].WorktreePath
+
+	ws, removed, err := h.remover.RemoveRepos(ws.Name, []string{"svc-b"}, app.DeleteOpts{DeleteBranch: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(removed.Repos) != 1 || len(ws.Repos) != 1 || ws.Repos[0].RepoName != "svc-a" {
+		t.Fatalf("removed = %#v, repos = %#v", removed, ws.Repos)
+	}
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Fatalf("worktree directory should be gone, stat err = %v", err)
+	}
+	if h.git.BranchExists(h.srcB, "feat/login") {
+		t.Error("--delete-branch should remove the branch bosk created")
+	}
+	if !h.git.BranchExists(h.srcA, "feat/login") {
+		t.Error("the repo that stays keeps its branch")
+	}
+	if statuses := h.inspector.Status(ws); len(statuses) != 1 || statuses[0].Error != "" {
+		t.Fatalf("status = %#v", statuses)
+	}
+	issues, err := h.doctor.Diagnose()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 0 {
+		t.Fatalf("doctor issues = %#v", issues)
+	}
+}

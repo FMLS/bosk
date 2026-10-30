@@ -1,6 +1,9 @@
 package domain
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // SelectRepos returns the requested repositories in request order, ignoring
 // blanks and duplicates.
@@ -46,4 +49,19 @@ func (e *MissingReposError) Error() string {
 		msg += " (available: " + strings.Join(e.Available, ", ") + ")"
 	}
 	return msg
+}
+
+// ValidateDisjoint rejects a repository that is requested both as a worktree
+// and as a shared link.
+func ValidateDisjoint(repos, shared []string) error {
+	in := make(map[string]bool, len(repos))
+	for _, n := range repos {
+		in[n] = true
+	}
+	for _, n := range shared {
+		if in[n] {
+			return fmt.Errorf("repo %q cannot be both a worktree repository and a shared repository", n)
+		}
+	}
+	return nil
 }

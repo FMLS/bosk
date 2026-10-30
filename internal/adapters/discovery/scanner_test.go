@@ -1,7 +1,9 @@
 package discovery_test
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/FMLS/bosk/internal/adapters/discovery"
@@ -65,5 +67,24 @@ func TestDiscoverIgnoresHiddenAndVendorDirs(t *testing.T) {
 
 	if len(repos) != 1 || repos[0].Name != "visible" {
 		t.Fatalf("repos = %v", repos)
+	}
+}
+
+func TestDiscoverDoesNotFollowSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs developer mode on Windows")
+	}
+	root := t.TempDir()
+	real := t.TempDir()
+	testsupport.InitRepo(t, filepath.Join(real, "linked"))
+	if err := os.Symlink(filepath.Join(real, "linked"), filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	testsupport.InitRepo(t, filepath.Join(root, "plain"))
+
+	repos, _ := newScanner().Discover([]string{root})
+
+	if len(repos) != 1 || repos[0].Name != "plain" {
+		t.Fatalf("repos = %v, want a symlink (such as a workspace's shared link) left out", repos)
 	}
 }

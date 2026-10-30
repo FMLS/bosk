@@ -42,6 +42,10 @@ func (k trashKeeper) remove(path string) error {
 	if clean != k.root && !strings.HasPrefix(clean, k.root+string(filepath.Separator)) {
 		return fmt.Errorf("refusing to delete path outside trash: %s", path)
 	}
+	// A quarantined workspace may hold symlinks to shared repositories.
+	// RemoveAll deletes a symlink itself and never descends into its target, so
+	// the source repository survives. Do not replace this with a recursive walk
+	// that follows links.
 	if err := k.fs.RemoveAll(clean); err != nil {
 		return err
 	}

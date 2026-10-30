@@ -18,10 +18,12 @@ import (
 type Presenter interface {
 	Initialized(res app.InitResult) error
 	Created(ws domain.Workspace) error
+	Added(ws domain.Workspace, added app.Members) error
+	Removed(ws domain.Workspace, removed app.Members) error
 	Deleted(name string) error
 	Workspaces(list []domain.Workspace) error
 	Repos(repos []domain.Repo) error
-	Status(ws domain.Workspace, rows []domain.RepoStatus) error
+	Status(ws domain.Workspace, rows []domain.RepoStatus, shared []domain.SharedStatus) error
 	Issues(issues []domain.Issue) error
 	Path(path string) error
 	// MachineReadable reports whether the output is meant for a program. The
@@ -61,6 +63,37 @@ func (p textPresenter) Created(ws domain.Workspace) error {
 	for _, repo := range ws.Repos {
 		fmt.Fprintf(p.out, "  %s\t%s\n", repo.RepoName, repo.WorktreePath)
 	}
+	p.sharedLines(ws.Shared)
+	fmt.Fprintln(p.out, ws.Path)
+	return nil
+}
+
+// sharedLines lists linked repositories, marked so they read differently from
+// worktrees.
+func (p textPresenter) sharedLines(shared []domain.SharedRepo) {
+	for _, s := range shared {
+		fmt.Fprintf(p.out, "  %s\t%s -> %s (shared)\n", s.RepoName, s.LinkPath, s.SourceRepo)
+	}
+}
+
+func (p textPresenter) Added(ws domain.Workspace, added app.Members) error {
+	fmt.Fprintf(p.out, "added %d repositories to workspace %s\n", len(added.Repos)+len(added.Shared), ws.Name)
+	for _, repo := range added.Repos {
+		fmt.Fprintf(p.out, "  %s\t%s\n", repo.RepoName, repo.WorktreePath)
+	}
+	p.sharedLines(added.Shared)
+	fmt.Fprintln(p.out, ws.Path)
+	return nil
+}
+
+func (p textPresenter) Removed(ws domain.Workspace, removed app.Members) error {
+	fmt.Fprintf(p.out, "removed %d repositories from workspace %s\n", len(removed.Repos)+len(removed.Shared), ws.Name)
+	for _, repo := range removed.Repos {
+		fmt.Fprintf(p.out, "  %s\n", repo.RepoName)
+	}
+	for _, s := range removed.Shared {
+		fmt.Fprintf(p.out, "  %s (shared)\n", s.RepoName)
+	}
 	fmt.Fprintln(p.out, ws.Path)
 	return nil
 }
@@ -77,9 +110,9 @@ func (p textPresenter) Workspaces(list []domain.Workspace) error {
 	}
 	rows := make([][]string, 0, len(list))
 	for _, ws := range list {
-		rows = append(rows, []string{ws.Name, ws.Branch, strconv.Itoa(len(ws.Repos)), ws.Path})
+		rows = append(rows, []string{ws.Name, ws.Branch, strconv.Itoa(len(ws.Repos)), strconv.Itoa(len(ws.Shared)), ws.Path})
 	}
-	p.table([]string{"NAME", "BRANCH", "REPOS", "PATH"}, rows)
+	p.table([]string{"NAME", "BRANCH", "REPOS", "SHARED", "PATH"}, rows)
 	return nil
 }
 
@@ -96,7 +129,7 @@ func (p textPresenter) Repos(repos []domain.Repo) error {
 	return nil
 }
 
-func (p textPresenter) Status(ws domain.Workspace, statuses []domain.RepoStatus) error {
+func (p textPresenter) Status(ws domain.Workspace, statuses []domain.RepoStatus, shared []domain.SharedStatus) error {
 	fmt.Fprintf(p.out, "%s  %s\n", ws.Name, ws.Branch)
 	rows := make([][]string, 0, len(statuses))
 	for _, st := range statuses {
@@ -110,6 +143,19 @@ func (p textPresenter) Status(ws domain.Workspace, statuses []domain.RepoStatus)
 		})
 	}
 	p.table([]string{"REPO", "BRANCH", "DIRTY", "AHEAD", "BEHIND", "ERROR"}, rows)
+	if len(shared) == 0 {
+		return nil
+	}
+	fmt.Fprintln(p.out)
+	linkRows := make([][]string, 0, len(shared))
+	for _, st := range shared {
+		state := "ok"
+		if !st.Valid {
+			state = "broken: " + st.Error
+		}
+		linkRows = append(linkRows, []string{st.Repo, st.Path, state})
+	}
+	p.table([]string{"SHARED", "PATH", "LINK"}, linkRows)
 	return nil
 }
 
@@ -158,6 +204,14 @@ func (p jsonPresenter) Initialized(res app.InitResult) error {
 
 func (p jsonPresenter) Created(ws domain.Workspace) error { return p.encode(ws) }
 
+func (p jsonPresenter) Added(ws domain.Workspace, _ app.Members) error {
+	return p.encode(ws)
+}
+
+func (p jsonPresenter) Removed(ws domain.Workspace, _ app.Members) error {
+	return p.encode(ws)
+}
+
 func (p jsonPresenter) Deleted(name string) error {
 	return p.encode(map[string]any{"deleted": name})
 }
@@ -166,13 +220,17 @@ func (p jsonPresenter) Workspaces(list []domain.Workspace) error { return p.enco
 
 func (p jsonPresenter) Repos(repos []domain.Repo) error { return p.encode(repos) }
 
-func (p jsonPresenter) Status(ws domain.Workspace, statuses []domain.RepoStatus) error {
-	return p.encode(map[string]any{
+func (p jsonPresenter) Status(ws domain.Workspace, statuses []domain.RepoStatus, shared []domain.SharedStatus) error {
+	out := map[string]any{
 		"name":   ws.Name,
 		"branch": ws.Branch,
 		"path":   ws.Path,
 		"repos":  statuses,
-	})
+	}
+	if len(shared) > 0 {
+		out["shared"] = shared
+	}
+	return p.encode(out)
 }
 
 // issueJSON is the wire shape of a finding. Kind is the field a script should

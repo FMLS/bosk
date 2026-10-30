@@ -14,7 +14,25 @@ type CreateOpts struct {
 	Name      string
 	Branch    string
 	RepoNames []string
-	All       bool
+	// SharedNames are repositories linked into the workspace rather than
+	// checked out as worktrees.
+	SharedNames []string
+	All         bool
+}
+
+// AddOpts is input for adding repositories to an existing workspace.
+type AddOpts struct {
+	Name        string
+	RepoNames   []string
+	SharedNames []string
+	All         bool
+}
+
+// Members is what an add or remove attempt changed in a workspace: the
+// worktree repositories and the shared repository links.
+type Members struct {
+	Repos  []domain.RepoWorktree
+	Shared []domain.SharedRepo
 }
 
 // Creator provisions a workspace of linked worktrees.
@@ -47,15 +65,21 @@ func (c *Creator) Create(opts CreateOpts) (domain.Workspace, error) {
 	if err != nil {
 		return domain.Workspace{}, err
 	}
-	selected, err := c.selectRepos(opts)
+	selected, shared, err := c.selectRepos(opts.RepoNames, opts.SharedNames, opts.All)
 	if err != nil {
 		return domain.Workspace{}, err
+	}
+	if len(selected) == 0 {
+		if len(shared) > 0 {
+			return domain.Workspace{}, fmt.Errorf("a workspace needs at least one worktree repository; select one with --repos or --all")
+		}
+		return domain.Workspace{}, fmt.Errorf("select repositories with --repos or --all")
 	}
 
 	wsPath := filepath.Join(c.cfg.WorkspaceDir, name)
 	var result domain.Workspace
 	err = c.registry.WithLock(func() error {
-		ws, err := c.provision(name, branch, wsPath, selected)
+		ws, err := c.provision(name, branch, wsPath, selected, shared)
 		if err != nil {
 			return err
 		}
@@ -88,39 +112,58 @@ func (c *Creator) resolveNames(opts CreateOpts) (name, branch string, err error)
 	return name, branch, nil
 }
 
-func (c *Creator) selectRepos(opts CreateOpts) ([]domain.Repo, error) {
-	if opts.All && len(opts.RepoNames) > 0 {
-		return nil, fmt.Errorf("use either --repos or --all, not both")
+// selectRepos resolves the flags against the discovered repositories. It
+// returns the repositories to check out and the ones to link; either may be
+// empty, and each caller decides which combinations it accepts. With all, the
+// worktree set is every discovered repository except the shared ones.
+func (c *Creator) selectRepos(repoNames, sharedNames []string, all bool) (worktrees, shared []domain.Repo, err error) {
+	if all && len(repoNames) > 0 {
+		return nil, nil, fmt.Errorf("use either --repos or --all, not both")
+	}
+	if err := domain.ValidateDisjoint(repoNames, sharedNames); err != nil {
+		return nil, nil, err
 	}
 	found, skipped := c.discoverer.Discover(c.cfg.RepoDirs)
 	for _, p := range skipped {
 		c.warner.Warn("skipped duplicate repo name: " + p)
 	}
 	if len(found) == 0 {
-		return nil, fmt.Errorf("no git repositories found under repo_dirs")
+		return nil, nil, fmt.Errorf("no git repositories found under repo_dirs")
 	}
 
-	var selected []domain.Repo
-	var err error
+	shared, err = domain.SelectRepos(found, sharedNames)
+	if err != nil {
+		return nil, nil, err
+	}
 	switch {
-	case opts.All:
-		selected = found
-	case len(opts.RepoNames) > 0:
-		selected, err = domain.SelectRepos(found, opts.RepoNames)
+	case all:
+		worktrees = withoutRepos(found, shared)
+	case len(repoNames) > 0:
+		worktrees, err = domain.SelectRepos(found, repoNames)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-	default:
-		return nil, fmt.Errorf("select repositories with --repos or --all")
 	}
-	if len(selected) == 0 {
-		return nil, fmt.Errorf("no repositories selected")
+	return worktrees, shared, nil
+}
+
+// withoutRepos returns repos minus the ones in drop, keeping order.
+func withoutRepos(repos, drop []domain.Repo) []domain.Repo {
+	dropped := make(map[string]bool, len(drop))
+	for _, r := range drop {
+		dropped[r.Name] = true
 	}
-	return selected, nil
+	var out []domain.Repo
+	for _, r := range repos {
+		if !dropped[r.Name] {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // provision runs under the registry lock.
-func (c *Creator) provision(name, branch, wsPath string, selected []domain.Repo) (domain.Workspace, error) {
+func (c *Creator) provision(name, branch, wsPath string, selected, shared []domain.Repo) (domain.Workspace, error) {
 	reg, err := c.registry.Load()
 	if err != nil {
 		return domain.Workspace{}, err
@@ -139,20 +182,16 @@ func (c *Creator) provision(name, branch, wsPath string, selected []domain.Repo)
 
 	rollback := newRollbackLog(c.git, c.fs, wsPath)
 	ws := domain.NewWorkspace(name, wsPath, branch, c.clock.Now())
-	for _, repo := range selected {
-		worktree, err := c.addWorktree(repo, wsPath, branch)
-		if err != nil {
-			rollback.undo()
-			return domain.Workspace{}, fmt.Errorf("%s: %w", repo.Name, err)
-		}
-		rollback.record(createdWorktree{
-			source:        repo.Path,
-			path:          worktree.WorktreePath,
-			branch:        branch,
-			createdBranch: worktree.CreatedBranch,
-		})
-		ws.Repos = append(ws.Repos, worktree)
+	worktrees, err := c.addAll(selected, wsPath, branch, rollback)
+	if err != nil {
+		return domain.Workspace{}, err
 	}
+	links, err := c.linkAll(shared, wsPath, rollback)
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+	ws.Repos = worktrees
+	ws.Shared = links
 
 	reg.Upsert(ws)
 	if err := c.registry.Save(reg); err != nil {
@@ -160,6 +199,157 @@ func (c *Creator) provision(name, branch, wsPath string, selected []domain.Repo)
 		return domain.Workspace{}, err
 	}
 	return ws, nil
+}
+
+// Add provisions worktrees and shared links for more repositories in an
+// existing workspace, on the branch the workspace already uses. A failure
+// removes only what this attempt added; the workspace directory and its earlier
+// members stay.
+func (c *Creator) Add(opts AddOpts) (domain.Workspace, Members, error) {
+	selected, shared, err := c.selectRepos(opts.RepoNames, opts.SharedNames, opts.All)
+	if err != nil {
+		return domain.Workspace{}, Members{}, err
+	}
+	if len(selected) == 0 && len(shared) == 0 {
+		return domain.Workspace{}, Members{}, fmt.Errorf("select repositories with --repos, --all or --shared")
+	}
+
+	var (
+		result domain.Workspace
+		added  Members
+	)
+	err = c.registry.WithLock(func() error {
+		ws, members, err := c.extend(opts, selected, shared)
+		if err != nil {
+			return err
+		}
+		result, added = ws, members
+		return nil
+	})
+	return result, added, err
+}
+
+// extend runs under the registry lock.
+func (c *Creator) extend(opts AddOpts, selected, shared []domain.Repo) (domain.Workspace, Members, error) {
+	reg, err := c.registry.Load()
+	if err != nil {
+		return domain.Workspace{}, Members{}, err
+	}
+	ws, ok := reg.Get(opts.Name)
+	if !ok {
+		return domain.Workspace{}, Members{}, fmt.Errorf("workspace %q not found", opts.Name)
+	}
+	if isDir, err := c.fs.IsDir(ws.Path); err != nil || !isDir {
+		return domain.Workspace{}, Members{}, fmt.Errorf("workspace directory missing: %s (run bosk doctor)", ws.Path)
+	}
+
+	toAdd, err := newRepos(ws, selected, opts.All)
+	if err != nil {
+		return domain.Workspace{}, Members{}, err
+	}
+	if err := checkShared(ws, shared); err != nil {
+		return domain.Workspace{}, Members{}, err
+	}
+	if len(toAdd) == 0 && len(shared) == 0 {
+		return domain.Workspace{}, Members{}, fmt.Errorf("no repositories to add")
+	}
+	// Lstat, not stat: a dangling symlink at the target path still blocks us.
+	for _, repo := range append(append([]domain.Repo(nil), toAdd...), shared...) {
+		path := filepath.Join(ws.Path, repo.Name)
+		if exists, err := c.fs.LinkExists(path); err != nil {
+			return domain.Workspace{}, Members{}, err
+		} else if exists {
+			return domain.Workspace{}, Members{}, fmt.Errorf("%s: path already exists: %s", repo.Name, path)
+		}
+	}
+
+	c.fetchAll(toAdd)
+
+	rollback := newRollbackLog(c.git, c.fs, "")
+	worktrees, err := c.addAll(toAdd, ws.Path, ws.Branch, rollback)
+	if err != nil {
+		return domain.Workspace{}, Members{}, err
+	}
+	links, err := c.linkAll(shared, ws.Path, rollback)
+	if err != nil {
+		return domain.Workspace{}, Members{}, err
+	}
+	ws.Repos = append(ws.Repos, worktrees...)
+	if ws, err = ws.WithShared(links); err != nil {
+		rollback.undo()
+		return domain.Workspace{}, Members{}, err
+	}
+
+	reg.Upsert(ws)
+	if err := c.registry.Save(reg); err != nil {
+		rollback.undo()
+		return domain.Workspace{}, Members{}, err
+	}
+	return ws, Members{Repos: worktrees, Shared: links}, nil
+}
+
+// newRepos drops repositories the workspace already holds. Naming one
+// explicitly is an error; --all just skips it.
+func newRepos(ws domain.Workspace, selected []domain.Repo, all bool) ([]domain.Repo, error) {
+	var out []domain.Repo
+	for _, repo := range selected {
+		if !ws.HasMember(repo.Name) {
+			out = append(out, repo)
+			continue
+		}
+		if !all {
+			return nil, fmt.Errorf("repo %q is already in workspace %q", repo.Name, ws.Name)
+		}
+	}
+	return out, nil
+}
+
+// checkShared rejects a shared repository the workspace already holds, whether as
+// a worktree or as a link.
+func checkShared(ws domain.Workspace, shared []domain.Repo) error {
+	for _, repo := range shared {
+		if ws.HasMember(repo.Name) {
+			return fmt.Errorf("repo %q is already in workspace %q", repo.Name, ws.Name)
+		}
+	}
+	return nil
+}
+
+// linkAll links each shared repository into the workspace directory, recording
+// each in rollback. On a failure it undoes the attempt before returning.
+func (c *Creator) linkAll(repos []domain.Repo, wsPath string, rollback *rollbackLog) ([]domain.SharedRepo, error) {
+	var out []domain.SharedRepo
+	for _, repo := range repos {
+		link := filepath.Join(wsPath, repo.Name)
+		if err := c.fs.Symlink(repo.Path, link); err != nil {
+			rollback.undo()
+			return nil, fmt.Errorf("%s: %w", repo.Name, err)
+		}
+		rollback.recordLink(link)
+		out = append(out, domain.SharedRepo{RepoName: repo.Name, SourceRepo: repo.Path, LinkPath: link})
+	}
+	return out, nil
+}
+
+// addAll adds one worktree per repository, recording each in rollback. On a
+// failure it undoes the attempt before returning.
+func (c *Creator) addAll(repos []domain.Repo, wsPath, branch string, rollback *rollbackLog) ([]domain.RepoWorktree, error) {
+	var out []domain.RepoWorktree
+	for _, repo := range repos {
+		worktree, err := c.addWorktree(repo, wsPath, branch)
+		if err != nil {
+			rollback.undo()
+			return nil, fmt.Errorf("%s: %w", repo.Name, err)
+		}
+		rollback.record(createdWorktree{
+			source:        repo.Path,
+			path:          worktree.WorktreePath,
+			branch:        branch,
+			createdBranch: worktree.CreatedBranch,
+		})
+		out = append(out, worktree)
+	}
+	return out, nil
 }
 
 // addWorktree checks out branch for one repository, creating the branch from

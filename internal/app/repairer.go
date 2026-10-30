@@ -9,11 +9,12 @@ import (
 type Repairer struct {
 	remover WorkspaceRemover
 	trash   trashKeeper
+	fs      FileSystem
 }
 
 // NewRepairer wires the repair use case to its collaborators.
 func NewRepairer(cfg *domain.Config, remover WorkspaceRemover, fs FileSystem) *Repairer {
-	return &Repairer{remover: remover, trash: newTrashKeeper(cfg, fs)}
+	return &Repairer{remover: remover, trash: newTrashKeeper(cfg, fs), fs: fs}
 }
 
 // Repair fixes what it can and stops at the first repair that fails.
@@ -36,7 +37,30 @@ func (r *Repairer) Repair(issues []domain.Issue) error {
 			if err := r.remover.Delete(issue.Workspace, DeleteOpts{Force: true}); err != nil {
 				return err
 			}
+		case domain.IssueSharedLinkMissing, domain.IssueSharedLinkMismatch:
+			// A workspace deleted above takes its links with it.
+			if dropped[issue.Workspace] {
+				continue
+			}
+			if err := r.relink(issue); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// relink points the workspace's link back at the recorded source repository. A
+// mismatched path is replaced only while it is still a symlink; RemoveAll then
+// drops the link itself and never the repository it pointed at.
+func (r *Repairer) relink(issue domain.Issue) error {
+	if issue.Kind == domain.IssueSharedLinkMismatch {
+		if _, err := r.fs.Readlink(issue.Path); err != nil {
+			return err
+		}
+		if err := r.fs.RemoveAll(issue.Path); err != nil {
+			return err
+		}
+	}
+	return r.fs.Symlink(issue.Target, issue.Path)
 }

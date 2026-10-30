@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/FMLS/bosk/internal/domain"
 )
@@ -205,6 +206,207 @@ func (r *Remover) restore(ws domain.Workspace, trashPath string) {
 		return
 	}
 	_ = r.fs.Rename(trashPath, ws.Path)
+	for _, repo := range ws.Repos {
+		_ = r.git.WorktreeRepair(repo.SourceRepo, repo.WorktreePath)
+	}
+}
+
+// RemoveRepos takes the named repositories out of a workspace, leaving the rest
+// in place. A name may be a worktree repository or a shared one. Like Delete,
+// each worktree is quarantined first so that a failure part-way through can put
+// it back; a shared repository is just a link, which is dropped last.
+func (r *Remover) RemoveRepos(name string, repoNames []string, opts DeleteOpts) (domain.Workspace, Members, error) {
+	var (
+		updated domain.Workspace
+		removed Members
+	)
+	err := r.registry.WithLock(func() error {
+		reg, err := r.registry.Load()
+		if err != nil {
+			return err
+		}
+		ws, ok := reg.Get(name)
+		if !ok {
+			return fmt.Errorf("workspace %q not found", name)
+		}
+		removed, err = selectWorkspaceRepos(ws, repoNames)
+		if err != nil {
+			return err
+		}
+		sub := domain.Workspace{Name: ws.Name, Path: ws.Path, Branch: ws.Branch, Repos: removed.Repos}
+
+		if !opts.Force {
+			if err := r.preflight(sub); err != nil {
+				return err
+			}
+		}
+
+		trashPath, moved, err := r.quarantineRepos(sub)
+		if err != nil {
+			return err
+		}
+		restore := func() { r.restoreRepos(sub, moved) }
+
+		if err := r.pruneWorktrees(sub); err != nil {
+			restore()
+			return err
+		}
+
+		updated = ws.WithoutRepos(repoNamesOf(removed.Repos)).WithoutShared(sharedNamesOf(removed.Shared))
+		reg.Upsert(updated)
+		if err := r.registry.Save(reg); err != nil {
+			restore()
+			return err
+		}
+
+		if opts.DeleteBranch {
+			r.deleteBranches(sub, opts.ForceBranch)
+		}
+
+		r.removeLinks(removed.Shared)
+
+		if trashPath != "" {
+			if err := r.trash.remove(trashPath); err != nil {
+				r.warner.Warn("worktrees moved to " + trashPath + "; remove it manually")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.Workspace{}, Members{}, err
+	}
+	return updated, removed, nil
+}
+
+// selectWorkspaceRepos matches names against the repositories recorded in the
+// workspace, not against discovery, so a repository that has since left
+// repo_dirs can still be removed. A name is unique across worktree and shared
+// repositories, so it matches at most one. The result keeps the workspace's
+// order. Only worktree repositories count toward "cannot remove every
+// repository": a workspace needs one for its branch to mean anything.
+func selectWorkspaceRepos(ws domain.Workspace, names []string) (Members, error) {
+	if len(names) == 0 {
+		return Members{}, fmt.Errorf("no repositories selected; pass --repos")
+	}
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	var selected Members
+	for _, repo := range ws.Repos {
+		if want[repo.RepoName] {
+			selected.Repos = append(selected.Repos, repo)
+			delete(want, repo.RepoName)
+		}
+	}
+	for _, shared := range ws.Shared {
+		if want[shared.RepoName] {
+			selected.Shared = append(selected.Shared, shared)
+			delete(want, shared.RepoName)
+		}
+	}
+	if len(want) > 0 {
+		var unknown []string
+		for _, n := range names {
+			if want[n] {
+				unknown = append(unknown, n)
+				delete(want, n)
+			}
+		}
+		available := append(repoNamesOf(ws.Repos), sharedNamesOf(ws.Shared)...)
+		return Members{}, fmt.Errorf("repositories not in workspace %s: %s (available: %s)",
+			ws.Name, strings.Join(unknown, ", "), strings.Join(available, ", "))
+	}
+	if len(selected.Repos) == len(ws.Repos) {
+		return Members{}, fmt.Errorf("cannot remove every repository from workspace %s; use: bosk delete %s", ws.Name, ws.Name)
+	}
+	return selected, nil
+}
+
+func sharedNamesOf(shared []domain.SharedRepo) []string {
+	names := make([]string, len(shared))
+	for i, s := range shared {
+		names[i] = s.RepoName
+	}
+	return names
+}
+
+// removeLinks drops the symlinks of shared repositories. It deletes only a path
+// that is still a symlink, never a real directory someone put there since, and
+// never follows the link: the source repository stays untouched.
+func (r *Remover) removeLinks(shared []domain.SharedRepo) {
+	for _, s := range shared {
+		if _, err := r.fs.Readlink(s.LinkPath); err != nil {
+			if exists, _ := r.fs.LinkExists(s.LinkPath); exists {
+				r.warner.Warn(s.RepoName + ": " + s.LinkPath + " is not a symlink; left in place")
+			}
+			continue
+		}
+		if err := r.fs.RemoveAll(s.LinkPath); err != nil {
+			r.warner.Warn(fmt.Sprintf("could not remove link %s: %v", s.LinkPath, err))
+		}
+	}
+}
+
+func repoNamesOf(repos []domain.RepoWorktree) []string {
+	names := make([]string, len(repos))
+	for i, repo := range repos {
+		names[i] = repo.RepoName
+	}
+	return names
+}
+
+// movedWorktree records where a quarantined worktree came from.
+type movedWorktree struct{ from, to string }
+
+// quarantineRepos moves each existing worktree to
+// .trash/<workspace>/<timestamp>/<repo>. It returns the timestamped directory
+// ("" when nothing needed moving) and undoes its own moves on failure.
+func (r *Remover) quarantineRepos(ws domain.Workspace) (string, []movedWorktree, error) {
+	dest := ""
+	var moved []movedWorktree
+	fail := func(err error) (string, []movedWorktree, error) {
+		r.undoMoves(moved)
+		return "", nil, err
+	}
+	for _, repo := range ws.Repos {
+		exists, err := r.fs.Exists(repo.WorktreePath)
+		if err != nil {
+			return fail(err)
+		}
+		if !exists {
+			continue
+		}
+		if dest == "" {
+			dir := r.trash.dirFor(ws.Name)
+			if err := r.fs.MkdirAll(dir); err != nil {
+				return fail(err)
+			}
+			if dest, err = r.freeName(dir); err != nil {
+				return fail(err)
+			}
+			if err := r.fs.MkdirAll(dest); err != nil {
+				return fail(err)
+			}
+		}
+		to := filepath.Join(dest, repo.RepoName)
+		if err := r.fs.Rename(repo.WorktreePath, to); err != nil {
+			return fail(fmt.Errorf("%s: quarantining worktree: %w", repo.RepoName, err))
+		}
+		moved = append(moved, movedWorktree{from: repo.WorktreePath, to: to})
+	}
+	return dest, moved, nil
+}
+
+func (r *Remover) undoMoves(moved []movedWorktree) {
+	for _, m := range moved {
+		_ = r.fs.Rename(m.to, m.from)
+	}
+}
+
+// restoreRepos puts quarantined worktrees back and re-links them.
+func (r *Remover) restoreRepos(ws domain.Workspace, moved []movedWorktree) {
+	r.undoMoves(moved)
 	for _, repo := range ws.Repos {
 		_ = r.git.WorktreeRepair(repo.SourceRepo, repo.WorktreePath)
 	}

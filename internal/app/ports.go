@@ -117,6 +117,14 @@ type FileSystem interface {
 	// ListEntries returns the names of every entry in a directory.
 	ListEntries(path string) ([]string, error)
 	Getwd() (string, error)
+	// Symlink creates link pointing at target.
+	Symlink(target, link string) error
+	// Readlink returns the target a symbolic link points at.
+	Readlink(link string) (string, error)
+	// LinkExists reports whether path itself exists, without following a
+	// symbolic link. Exists follows it, so a dangling link reads as absent
+	// there but present here.
+	LinkExists(path string) (bool, error)
 }
 
 // PathResolver turns user-supplied paths into comparable absolute paths.

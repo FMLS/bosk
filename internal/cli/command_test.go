@@ -217,3 +217,126 @@ func TestCreateRejectsConflictingSelectionFlags(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestAddExtendsAWorkspace(t *testing.T) {
+	setupCLI(t)
+	if _, _, err := runCLI(t, "create", "-b", "feat/login", "-r", "svc-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runCLI(t, "add", "feat-login", "-r", "svc-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "added 1 repositories to workspace feat-login") || !strings.Contains(out, "svc-b") {
+		t.Fatalf("add output = %q", out)
+	}
+
+	out, _, err = runCLI(t, "status", "feat-login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "svc-a") || !strings.Contains(out, "svc-b") {
+		t.Fatalf("status output = %q", out)
+	}
+}
+
+func TestAddResolvesTheWorkspaceFromTheWorkingDirectory(t *testing.T) {
+	setupCLI(t)
+	out, _, err := runCLI(t, "create", "-b", "feat/login", "-r", "svc-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(lines[len(lines)-1]); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	out, _, err = runCLI(t, "add", "--all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "added 1 repositories to workspace feat-login") {
+		t.Fatalf("add output = %q", out)
+	}
+}
+
+func TestRemoveDropsARepoFromAWorkspace(t *testing.T) {
+	setupCLI(t)
+	if _, _, err := runCLI(t, "create", "-b", "feat/login", "-r", "svc-a,svc-b"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runCLI(t, "remove", "feat-login", "-r", "svc-b", "-y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "removed 1 repositories from workspace feat-login") || !strings.Contains(out, "svc-b") {
+		t.Fatalf("remove output = %q", out)
+	}
+
+	out, _, err = runCLI(t, "status", "feat-login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "svc-a") || strings.Contains(out, "svc-b") {
+		t.Fatalf("status output = %q", out)
+	}
+}
+
+func TestRemoveResolvesTheWorkspaceFromTheWorkingDirectory(t *testing.T) {
+	setupCLI(t)
+	out, _, err := runCLI(t, "create", "-b", "feat/login", "-r", "svc-a,svc-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(lines[len(lines)-1]); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	out, _, err = runCLI(t, "remove", "-r", "svc-a", "-y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "removed 1 repositories from workspace feat-login") {
+		t.Fatalf("remove output = %q", out)
+	}
+}
+
+func TestRemoveRefusals(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "no repos flag", args: []string{"remove", "feat-login", "-y"}, want: "pass --repos"},
+		{name: "unknown repo", args: []string{"remove", "feat-login", "-r", "svc-z", "-y"}, want: "repositories not in workspace feat-login: svc-z"},
+		{name: "every repo", args: []string{"remove", "feat-login", "-r", "svc-a,svc-b", "-y"}, want: "bosk delete feat-login"},
+		{name: "not confirmed", args: []string{"remove", "feat-login", "-r", "svc-b"}, want: "aborted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupCLI(t)
+			if _, _, err := runCLI(t, "create", "-b", "feat/login", "-r", "svc-a,svc-b"); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err := runCLI(t, tc.args...)
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}

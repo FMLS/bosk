@@ -108,6 +108,48 @@ func (i *Inspector) Status(ws domain.Workspace) []domain.RepoStatus {
 	return out
 }
 
+// SharedStatus reports whether each shared repository's link is still in place
+// and points at the recorded source. There is no branch or dirtiness to read:
+// the repository is shared, not checked out for this workspace.
+func (i *Inspector) SharedStatus(ws domain.Workspace) []domain.SharedStatus {
+	out := make([]domain.SharedStatus, 0, len(ws.Shared))
+	for _, shared := range ws.Shared {
+		out = append(out, i.sharedStatus(shared))
+	}
+	return out
+}
+
+func (i *Inspector) sharedStatus(shared domain.SharedRepo) domain.SharedStatus {
+	st := domain.SharedStatus{Repo: shared.RepoName, Path: shared.LinkPath}
+
+	exists, err := i.fs.LinkExists(shared.LinkPath)
+	if err != nil {
+		st.Error = err.Error()
+		return st
+	}
+	if !exists {
+		st.Error = "link missing"
+		return st
+	}
+	target, err := i.fs.Readlink(shared.LinkPath)
+	if err != nil {
+		st.Error = "not a symlink"
+		return st
+	}
+	st.Target = target
+	switch {
+	case filepath.Clean(target) != filepath.Clean(shared.SourceRepo):
+		st.Error = "points at " + target + ", expected " + shared.SourceRepo
+	default:
+		if ok, err := i.fs.Exists(shared.LinkPath); err != nil || !ok {
+			st.Error = "source missing"
+			break
+		}
+		st.Valid = true
+	}
+	return st
+}
+
 func (i *Inspector) repoStatus(repo domain.RepoWorktree) domain.RepoStatus {
 	st := domain.RepoStatus{Repo: repo.RepoName, Expected: repo.Branch}
 

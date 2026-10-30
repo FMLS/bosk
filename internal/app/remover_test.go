@@ -238,3 +238,187 @@ func TestDeleteUnknownWorkspace(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestRemoveReposTakesOnlyTheNamedRepos(t *testing.T) {
+	h := newHarness(t)
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a", "svc-b"}})
+	gone, kept := ws.Repos[1].WorktreePath, ws.Repos[0].WorktreePath
+	locks, saves := h.reg.Locks, h.reg.Saves
+
+	updated, removed, err := h.remover().RemoveRepos(ws.Name, []string{"svc-b"}, app.DeleteOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(removed.Repos) != 1 || removed.Repos[0].RepoName != "svc-b" {
+		t.Fatalf("removed = %#v", removed)
+	}
+	if len(updated.Repos) != 1 || updated.Repos[0].RepoName != "svc-a" {
+		t.Fatalf("updated repos = %#v", updated.Repos)
+	}
+	stored, _ := h.reg.Registry.Get(ws.Name)
+	if len(stored.Repos) != 1 || stored.Repos[0].RepoName != "svc-a" {
+		t.Errorf("registry repos = %#v", stored.Repos)
+	}
+	if h.reg.Locks != locks+1 || h.reg.Saves != saves+1 {
+		t.Errorf("locks %d->%d, saves %d->%d", locks, h.reg.Locks, saves, h.reg.Saves)
+	}
+	if exists(t, h.fs, gone) {
+		t.Error("the removed worktree should be gone")
+	}
+	if !exists(t, h.fs, kept) {
+		t.Error("the other worktree must be left alone")
+	}
+	if !h.recorded("worktree-prune /src/svc-b") || h.recorded("worktree-prune /src/svc-a") {
+		t.Errorf("only svc-b should be pruned, calls = %v", h.git.Calls)
+	}
+	if exists(t, h.fs, h.trashPath("feat-login")) {
+		t.Errorf("the trash should be tidy, paths = %v", h.fs.Paths())
+	}
+	if !h.git.BranchExists("/src/svc-b", "feat/login") {
+		t.Error("the local branch is kept unless asked")
+	}
+}
+
+func TestRemoveReposDeletesOnlyBranchesBoskCreated(t *testing.T) {
+	h := newHarness(t)
+	withSvcC(h)
+	h.git.AddRepo("/src/svc-b", "feat/login") // pre-existing branch in svc-b
+	h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a", "svc-b", "svc-c"}})
+
+	if _, _, err := h.remover().RemoveRepos("feat-login", []string{"svc-a", "svc-b"}, app.DeleteOpts{DeleteBranch: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if h.git.BranchExists("/src/svc-a", "feat/login") {
+		t.Error("the branch bosk created should be deleted")
+	}
+	if !h.git.BranchExists("/src/svc-b", "feat/login") {
+		t.Error("a pre-existing branch must be left alone")
+	}
+	if !h.git.BranchExists("/src/svc-c", "feat/login") {
+		t.Error("a repo that stays in the workspace keeps its branch")
+	}
+}
+
+func TestRemoveReposRefusals(t *testing.T) {
+	cases := []struct {
+		name      string
+		workspace string
+		repos     []string
+		setup     func(h *harness, worktree string)
+		want      string
+	}{
+		{name: "unknown workspace", workspace: "nope", repos: []string{"svc-a"}, want: `workspace "nope" not found`},
+		{name: "nothing selected", workspace: "feat-login", want: "no repositories selected"},
+		{name: "unknown repo", workspace: "feat-login", repos: []string{"svc-z"}, want: "repositories not in workspace feat-login: svc-z (available: svc-a, svc-b)"},
+		{name: "every repo", workspace: "feat-login", repos: []string{"svc-a", "svc-b"}, want: "use: bosk delete feat-login"},
+		{
+			name: "uncommitted changes", workspace: "feat-login", repos: []string{"svc-b"},
+			setup: func(h *harness, wt string) { h.git.DirtyPaths[wt] = 1 },
+			want:  "svc-b: has uncommitted changes; use --force",
+		},
+		{
+			name: "drifted branch", workspace: "feat-login", repos: []string{"svc-b"},
+			setup: func(h *harness, wt string) { h.git.CheckOut("/src/svc-b", wt, "other") },
+			want:  `checked out "other", expected "feat/login"; use --force`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a", "svc-b"}})
+			if tc.setup != nil {
+				tc.setup(h, ws.Repos[1].WorktreePath)
+			}
+			saves := h.reg.Saves
+
+			_, _, err := h.remover().RemoveRepos(tc.workspace, tc.repos, app.DeleteOpts{})
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want it to mention %q", err, tc.want)
+			}
+			if h.reg.Saves != saves {
+				t.Error("a refused remove must not touch the registry")
+			}
+			stored, _ := h.reg.Registry.Get(ws.Name)
+			if len(stored.Repos) != 2 {
+				t.Errorf("repos = %#v", stored.Repos)
+			}
+			if !exists(t, h.fs, ws.Repos[1].WorktreePath) {
+				t.Error("a refused remove must leave the worktree alone")
+			}
+		})
+	}
+}
+
+func TestRemoveReposForceBypassesPreflight(t *testing.T) {
+	h := newHarness(t)
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a", "svc-b"}})
+	h.git.DirtyPaths[ws.Repos[1].WorktreePath] = 3
+
+	if _, _, err := h.remover().RemoveRepos(ws.Name, []string{"svc-b"}, app.DeleteOpts{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	stored, _ := h.reg.Registry.Get(ws.Name)
+	if len(stored.Repos) != 1 {
+		t.Errorf("repos = %#v", stored.Repos)
+	}
+}
+
+func TestRemoveReposRestoresTheWorktreeWhenSaveFails(t *testing.T) {
+	h := newHarness(t)
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a", "svc-b"}})
+	wt := ws.Repos[1].WorktreePath
+	h.reg.SaveErr = errors.New("disk full")
+
+	_, _, err := h.remover().RemoveRepos(ws.Name, []string{"svc-b"}, app.DeleteOpts{})
+
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("error = %v", err)
+	}
+	if !exists(t, h.fs, wt) {
+		t.Error("the worktree should be restored")
+	}
+	stored, _ := h.reg.Registry.Get(ws.Name)
+	if len(stored.Repos) != 2 {
+		t.Errorf("repos = %#v", stored.Repos)
+	}
+	if !h.recorded("worktree-repair /src/svc-b " + wt) {
+		t.Errorf("restore should repair the worktree links, calls = %v", h.git.Calls)
+	}
+}
+
+func TestRemoveReposRestoresTheWorktreeWhenPruneFails(t *testing.T) {
+	h := newHarness(t)
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a", "svc-b"}})
+	h.git.PruneErr["/src/svc-b"] = errors.New("prune failed")
+
+	_, _, err := h.remover().RemoveRepos(ws.Name, []string{"svc-b"}, app.DeleteOpts{})
+
+	if err == nil || !strings.Contains(err.Error(), "prune failed") {
+		t.Fatalf("error = %v", err)
+	}
+	if !exists(t, h.fs, ws.Repos[1].WorktreePath) {
+		t.Error("the worktree should be restored")
+	}
+}
+
+func TestRemoveReposWarnsWhenTheQuarantinedCopyCannotBeDeleted(t *testing.T) {
+	h := newHarness(t)
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a", "svc-b"}})
+	quarantine := h.trashPath("feat-login", "20240102T030405Z")
+	h.fs.RemoveErr[quarantine] = errors.New("busy")
+
+	if _, _, err := h.remover().RemoveRepos(ws.Name, []string{"svc-b"}, app.DeleteOpts{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !exists(t, h.fs, h.trashPath("feat-login", "20240102T030405Z", "svc-b")) {
+		t.Fatalf("paths = %v", h.fs.Paths())
+	}
+	if !h.warner.Contains("remove it manually") {
+		t.Errorf("warnings = %v", h.warner.Messages)
+	}
+}

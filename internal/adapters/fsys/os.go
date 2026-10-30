@@ -1,7 +1,10 @@
 // Package fsys implements the filesystem port against the real filesystem.
 package fsys
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 const dirPerm = 0o755
 
@@ -70,3 +73,24 @@ func (OS) ListEntries(path string) ([]string, error) {
 }
 
 func (OS) Getwd() (string, error) { return os.Getwd() }
+
+func (OS) Symlink(target, link string) error {
+	if err := os.Symlink(target, link); err != nil {
+		return fmt.Errorf("creating symlink %s -> %s (on Windows this needs developer mode or elevated rights): %w", link, target, err)
+	}
+	return nil
+}
+
+func (OS) Readlink(link string) (string, error) { return os.Readlink(link) }
+
+// LinkExists reports whether path exists itself. It uses Lstat, so a dangling
+// symbolic link still counts as present.
+func (OS) LinkExists(path string) (bool, error) {
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}

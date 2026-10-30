@@ -19,7 +19,7 @@ func newStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return presenterFor(cmd, asJSON).Status(ws, inspector.Status(ws))
+			return presenterFor(cmd, asJSON).Status(ws, inspector.Status(ws), inspector.SharedStatus(ws))
 		},
 	}
 	cmd.Flags().BoolVarP(&asJSON, "json", "j", false, "print JSON")

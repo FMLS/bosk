@@ -90,6 +90,10 @@ func TestIntegrationCreateStatusDelete(t *testing.T) {
 	if len(ws.Repos) != 2 {
 		t.Fatalf("repos = %d", len(ws.Repos))
 	}
+	cwData, err := os.ReadFile(ws.CodeWorkspacePath())
+	if err != nil || !ws.ValidCodeWorkspace(cwData) {
+		t.Fatalf("code-workspace = %q, %v", cwData, err)
+	}
 	for _, repo := range ws.Repos {
 		if _, err := os.Stat(repo.WorktreePath); err != nil {
 			t.Fatal(err)

@@ -61,6 +61,10 @@ func TestCreateLinksSharedRepositories(t *testing.T) {
 			t.Error("a shared repository must not get the workspace branch")
 		}
 	}
+	data, err := h.fs.ReadFile(ws.CodeWorkspacePath())
+	if err != nil || !ws.ValidCodeWorkspace(data) {
+		t.Fatalf("code-workspace should include both worktree and shared repos: %q, %v", data, err)
+	}
 }
 
 func TestCreateWithOnlySharedRepositoriesFails(t *testing.T) {

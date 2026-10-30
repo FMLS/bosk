@@ -125,6 +125,8 @@ type FileSystem interface {
 	// symbolic link. Exists follows it, so a dangling link reads as absent
 	// there but present here.
 	LinkExists(path string) (bool, error)
+	ReadFile(path string) ([]byte, error)
+	WriteFile(path string, data []byte) error
 }
 
 // PathResolver turns user-supplied paths into comparable absolute paths.

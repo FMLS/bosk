@@ -192,6 +192,10 @@ func (c *Creator) provision(name, branch, wsPath string, selected, shared []doma
 	}
 	ws.Repos = worktrees
 	ws.Shared = links
+	if err := writeCodeWorkspace(c.fs, ws); err != nil {
+		rollback.undo()
+		return domain.Workspace{}, err
+	}
 
 	reg.Upsert(ws)
 	if err := c.registry.Save(reg); err != nil {
@@ -274,14 +278,23 @@ func (c *Creator) extend(opts AddOpts, selected, shared []domain.Repo) (domain.W
 	if err != nil {
 		return domain.Workspace{}, Members{}, err
 	}
+	origWS := ws
+	origWS.Repos = append([]domain.RepoWorktree(nil), ws.Repos...)
+	origWS.Shared = append([]domain.SharedRepo(nil), ws.Shared...)
+
 	ws.Repos = append(ws.Repos, worktrees...)
 	if ws, err = ws.WithShared(links); err != nil {
+		rollback.undo()
+		return domain.Workspace{}, Members{}, err
+	}
+	if err := writeCodeWorkspace(c.fs, ws); err != nil {
 		rollback.undo()
 		return domain.Workspace{}, Members{}, err
 	}
 
 	reg.Upsert(ws)
 	if err := c.registry.Save(reg); err != nil {
+		_ = writeCodeWorkspace(c.fs, origWS)
 		rollback.undo()
 		return domain.Workspace{}, Members{}, err
 	}
@@ -401,4 +414,19 @@ func (c *Creator) fetchAll(repos []domain.Repo) {
 		}(repo.Name, repo.Path)
 	}
 	wg.Wait()
+}
+
+// writeCodeWorkspace writes or updates the .code-workspace file for ws,
+// preserving any non-folders top-level keys already in the file.
+func writeCodeWorkspace(fs FileSystem, ws domain.Workspace) error {
+	return writeCodeWorkspaceFolders(fs, ws.CodeWorkspacePath(), ws.CodeWorkspaceFolders())
+}
+
+func writeCodeWorkspaceFolders(fs FileSystem, path string, folders []domain.CodeWorkspaceFolder) error {
+	existing, _ := fs.ReadFile(path)
+	data, err := domain.RenderCodeWorkspace(folders, existing)
+	if err != nil {
+		return err
+	}
+	return fs.WriteFile(path, data)
 }

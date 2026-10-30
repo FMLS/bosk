@@ -147,6 +147,18 @@ func TestIssueRenderingAndFixability(t *testing.T) {
 			message: "leftover trash: /ws/.trash/w/t",
 			action:  "bosk doctor --fix",
 		},
+		{
+			issue:   Issue{Kind: IssueCodeWorkspaceMissing, Workspace: "w", Path: "/ws/w/w.code-workspace"},
+			fixable: true,
+			message: "code-workspace file missing: /ws/w/w.code-workspace",
+			action:  "bosk doctor --fix",
+		},
+		{
+			issue:   Issue{Kind: IssueCodeWorkspaceOutOfSync, Workspace: "w", Path: "/ws/w/w.code-workspace"},
+			fixable: true,
+			message: "code-workspace file out of sync: /ws/w/w.code-workspace",
+			action:  "bosk doctor --fix",
+		},
 	}
 	for _, tc := range cases {
 		if got := tc.issue.Fixable(); got != tc.fixable {
@@ -242,5 +254,53 @@ func TestValidateDisjoint(t *testing.T) {
 	}
 	if err := ValidateDisjoint(nil, nil); err != nil {
 		t.Errorf("empty sets: %v", err)
+	}
+}
+
+func TestCodeWorkspaceRenderAndValidation(t *testing.T) {
+	ws := Workspace{
+		Name:   "feat-login",
+		Path:   "/ws/feat-login",
+		Repos:  []RepoWorktree{{RepoName: "svc-a"}, {RepoName: "svc-b"}},
+		Shared: []SharedRepo{{RepoName: "lib"}},
+	}
+
+	if got := ws.CodeWorkspacePath(); got != "/ws/feat-login/feat-login.code-workspace" {
+		t.Fatalf("CodeWorkspacePath = %q", got)
+	}
+
+	data, err := ws.RenderCodeWorkspace(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ws.ValidCodeWorkspace(data) {
+		t.Fatalf("rendered workspace should be valid:\n%s", data)
+	}
+
+	// Custom top-level fields (such as settings) are preserved across re-renders.
+	withSettings := []byte(`{"folders":[{"path":"old"}],"settings":{"editor.tabSize":4}}`)
+	updated, err := ws.RenderCodeWorkspace(withSettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ws.ValidCodeWorkspace(updated) {
+		t.Fatalf("re-rendered workspace should be valid:\n%s", updated)
+	}
+	if string(updated) == string(data) {
+		t.Fatalf("expected custom settings to be preserved:\n%s", updated)
+	}
+
+	for _, invalid := range [][]byte{
+		nil,
+		[]byte(`not json`),
+		[]byte(`null`),
+		[]byte(`{}`),
+		[]byte(`{"folders":null}`),
+		[]byte(`{"folders":[{"path":"svc-a"}]}`),
+		[]byte(`{"folders":[{"path":"svc-b"},{"path":"svc-a"},{"path":"lib"}]}`),
+	} {
+		if ws.ValidCodeWorkspace(invalid) {
+			t.Errorf("ValidCodeWorkspace(%q) = true, want false", invalid)
+		}
 	}
 }

@@ -15,6 +15,7 @@ import (
 type MemFS struct {
 	dirs  map[string]bool
 	files map[string]bool
+	data  map[string][]byte
 	links map[string]string
 
 	Cwd string
@@ -24,6 +25,8 @@ type MemFS struct {
 	RemoveErr map[string]error
 	StatErr   map[string]error
 	LinkErr   map[string]error
+	ReadErr   map[string]error
+	WriteErr  map[string]error
 }
 
 // NewMemFS returns an empty filesystem with the given working directory.
@@ -31,6 +34,7 @@ func NewMemFS(cwd string) *MemFS {
 	fs := &MemFS{
 		dirs:      map[string]bool{},
 		files:     map[string]bool{},
+		data:      map[string][]byte{},
 		links:     map[string]string{},
 		Cwd:       cwd,
 		MkdirErr:  map[string]error{},
@@ -38,6 +42,8 @@ func NewMemFS(cwd string) *MemFS {
 		RemoveErr: map[string]error{},
 		StatErr:   map[string]error{},
 		LinkErr:   map[string]error{},
+		ReadErr:   map[string]error{},
+		WriteErr:  map[string]error{},
 	}
 	if cwd != "" {
 		fs.AddDir(cwd)
@@ -145,6 +151,12 @@ func (fs *MemFS) Rename(oldPath, newPath string) error {
 			fs.links[to+strings.TrimPrefix(p, from)] = target
 		}
 	}
+	for p, b := range fs.data {
+		if p == from || strings.HasPrefix(p, from+string(filepath.Separator)) {
+			delete(fs.data, p)
+			fs.data[to+strings.TrimPrefix(p, from)] = b
+		}
+	}
 	move(fs.dirs)
 	move(fs.files)
 	fs.AddDir(filepath.Dir(to))
@@ -165,6 +177,11 @@ func (fs *MemFS) RemoveAll(path string) error {
 	}
 	drop(fs.dirs)
 	drop(fs.files)
+	for p := range fs.data {
+		if p == clean || strings.HasPrefix(p, clean+string(filepath.Separator)) {
+			delete(fs.data, p)
+		}
+	}
 	// Links are dropped by name only: their targets are never touched, which is
 	// how os.RemoveAll treats a symbolic link.
 	for p := range fs.links {
@@ -245,6 +262,34 @@ func (fs *MemFS) LinkExists(path string) (bool, error) {
 	}
 	_, isLink := fs.links[clean]
 	return fs.dirs[clean] || fs.files[clean] || isLink, nil
+}
+
+func (fs *MemFS) ReadFile(path string) ([]byte, error) {
+	clean := filepath.Clean(path)
+	if err := fs.ReadErr[clean]; err != nil {
+		return nil, err
+	}
+	if err := fs.StatErr[clean]; err != nil {
+		return nil, err
+	}
+	if !fs.files[clean] {
+		return nil, fmt.Errorf("open %s: %w", clean, os.ErrNotExist)
+	}
+	return append([]byte(nil), fs.data[clean]...), nil
+}
+
+func (fs *MemFS) WriteFile(path string, content []byte) error {
+	clean := filepath.Clean(path)
+	if err := fs.WriteErr[clean]; err != nil {
+		return err
+	}
+	if fs.dirs[clean] {
+		return fmt.Errorf("write %s: is a directory", clean)
+	}
+	fs.AddDir(filepath.Dir(clean))
+	fs.files[clean] = true
+	fs.data[clean] = append([]byte(nil), content...)
+	return nil
 }
 
 func (fs *MemFS) Getwd() (string, error) {

@@ -36,7 +36,8 @@ func (d *Doctor) Diagnose() ([]domain.Issue, error) {
 
 func (d *Doctor) workspaceIssues(ws domain.Workspace) []domain.Issue {
 	var issues []domain.Issue
-	if exists, err := d.fs.Exists(ws.Path); err != nil || !exists {
+	wsExists, err := d.fs.Exists(ws.Path)
+	if err != nil || !wsExists {
 		issues = append(issues, domain.Issue{
 			Kind:      domain.IssueWorkspaceDirMissing,
 			Workspace: ws.Name,
@@ -53,7 +54,32 @@ func (d *Doctor) workspaceIssues(ws domain.Workspace) []domain.Issue {
 			issues = append(issues, issue)
 		}
 	}
+	if wsExists {
+		if issue, ok := d.codeWorkspaceIssue(ws); ok {
+			issues = append(issues, issue)
+		}
+	}
 	return issues
+}
+
+func (d *Doctor) codeWorkspaceIssue(ws domain.Workspace) (domain.Issue, bool) {
+	path := ws.CodeWorkspacePath()
+	base := domain.Issue{
+		Workspace: ws.Name,
+		Path:      path,
+		Folders:   ws.CodeWorkspaceFolders(),
+	}
+	exists, err := d.fs.Exists(path)
+	if err != nil || !exists {
+		base.Kind = domain.IssueCodeWorkspaceMissing
+		return base, true
+	}
+	data, err := d.fs.ReadFile(path)
+	if err != nil || !ws.ValidCodeWorkspace(data) {
+		base.Kind = domain.IssueCodeWorkspaceOutOfSync
+		return base, true
+	}
+	return domain.Issue{}, false
 }
 
 // sharedIssue checks one shared repository: its source must still be a

@@ -119,3 +119,16 @@ func TestRemoveAllOnADirectoryHoldingALinkLeavesTheTarget(t *testing.T) {
 		t.Fatalf("removing a directory followed a link into its target: %v", err)
 	}
 }
+
+func TestWriteAndReadFile(t *testing.T) {
+	fs := New()
+	path := filepath.Join(t.TempDir(), "test.code-workspace")
+
+	if err := fs.WriteFile(path, []byte("hello\n")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := fs.ReadFile(path)
+	if err != nil || string(got) != "hello\n" {
+		t.Fatalf("ReadFile = %q, %v", got, err)
+	}
+}

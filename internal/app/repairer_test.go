@@ -174,3 +174,61 @@ func TestRepairAppliesRealFixesEndToEnd(t *testing.T) {
 		t.Error("the broken workspace should be out of the registry")
 	}
 }
+
+func TestRepairRebuildsMissingAndOutOfSyncCodeWorkspaceFiles(t *testing.T) {
+	h := newHarness(t)
+	ws1 := h.mustCreate(t, app.CreateOpts{Name: "task-1", Branch: "feat/a", RepoNames: []string{"svc-a"}})
+	ws2 := h.mustCreate(t, app.CreateOpts{Name: "task-2", Branch: "feat/b", RepoNames: []string{"svc-a", "svc-b"}})
+	if err := h.fs.RemoveAll(ws1.CodeWorkspacePath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.fs.WriteFile(ws2.CodeWorkspacePath(), []byte(`{"folders":[],"settings":{"go.useLanguageServer":true}}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	issues, err := h.doctor().Diagnose()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 2 {
+		t.Fatalf("issues = %#v", issues)
+	}
+	if err := h.repairer().Repair(issues); err != nil {
+		t.Fatal(err)
+	}
+
+	remaining, err := h.doctor().Diagnose()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("after repair: %#v", remaining)
+	}
+	data2, err := h.fs.ReadFile(ws2.CodeWorkspacePath())
+	if err != nil || !ws2.ValidCodeWorkspace(data2) || !strings.Contains(string(data2), `"go.useLanguageServer": true`) {
+		t.Fatalf("repaired task-2 code-workspace = %q, %v", data2, err)
+	}
+}
+
+func TestRepairDoesNotWriteCodeWorkspaceIntoADeletedWorkspace(t *testing.T) {
+	h := newHarness(t)
+	remover := &recordingRemover{}
+	repairer := app.NewRepairer(h.cfg, remover, h.fs)
+
+	err := repairer.Repair([]domain.Issue{
+		{Kind: domain.IssueWorktreePathMissing, Workspace: "task-1", Repo: "svc-a"},
+		{
+			Kind:      domain.IssueCodeWorkspaceMissing,
+			Workspace: "task-1",
+			Path:      "/ws/task-1/task-1.code-workspace",
+			Folders:   []domain.CodeWorkspaceFolder{{Path: "svc-a"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if exists(t, h.fs, "/ws/task-1/task-1.code-workspace") {
+		t.Error("no code-workspace file should be created inside a workspace that is being deleted")
+	}
+}

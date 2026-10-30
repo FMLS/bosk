@@ -6,7 +6,10 @@ import (
 	"os"
 )
 
-const dirPerm = 0o755
+const (
+	dirPerm  = 0o755
+	filePerm = 0o644
+)
 
 // OS implements the filesystem port using the os package.
 type OS struct{}
@@ -94,3 +97,7 @@ func (OS) LinkExists(path string) (bool, error) {
 	}
 	return true, nil
 }
+
+func (OS) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
+func (OS) WriteFile(path string, data []byte) error { return os.WriteFile(path, data, filePerm) }

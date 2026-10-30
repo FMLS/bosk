@@ -3,7 +3,10 @@
 package domain
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"time"
 )
 
@@ -150,4 +153,87 @@ type SharedStatus struct {
 	Target string `json:"target"`
 	Valid  bool   `json:"valid"`
 	Error  string `json:"error,omitempty"`
+}
+
+// CodeWorkspaceFolder is one entry in a .code-workspace "folders" array.
+type CodeWorkspaceFolder struct {
+	Path string `json:"path"`
+}
+
+// CodeWorkspacePath returns the path to the Cursor / VS Code .code-workspace
+// file inside the workspace directory.
+func (w Workspace) CodeWorkspacePath() string {
+	return filepath.Join(w.Path, w.Name+".code-workspace")
+}
+
+// CodeWorkspaceFolders returns the relative folder entries for the workspace:
+// worktree repositories first, then shared repositories, in workspace order.
+func (w Workspace) CodeWorkspaceFolders() []CodeWorkspaceFolder {
+	folders := make([]CodeWorkspaceFolder, 0, len(w.Repos)+len(w.Shared))
+	for _, repo := range w.Repos {
+		folders = append(folders, CodeWorkspaceFolder{Path: repo.RepoName})
+	}
+	for _, shared := range w.Shared {
+		folders = append(folders, CodeWorkspaceFolder{Path: shared.RepoName})
+	}
+	return folders
+}
+
+// RenderCodeWorkspace produces the JSON content for a .code-workspace file.
+// When existing is a valid JSON object, top-level keys other than "folders"
+// (such as "settings" or "extensions") are preserved.
+func RenderCodeWorkspace(folders []CodeWorkspaceFolder, existing []byte) ([]byte, error) {
+	if folders == nil {
+		folders = []CodeWorkspaceFolder{}
+	}
+	foldersJSON, err := json.Marshal(folders)
+	if err != nil {
+		return nil, err
+	}
+	doc := make(map[string]json.RawMessage)
+	if len(bytes.TrimSpace(existing)) > 0 {
+		_ = json.Unmarshal(existing, &doc)
+		if doc == nil {
+			doc = make(map[string]json.RawMessage)
+		}
+	}
+	doc["folders"] = foldersJSON
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+// RenderCodeWorkspace renders the .code-workspace JSON for w, preserving any
+// non-folders top-level keys from existing.
+func (w Workspace) RenderCodeWorkspace(existing []byte) ([]byte, error) {
+	return RenderCodeWorkspace(w.CodeWorkspaceFolders(), existing)
+}
+
+// ValidCodeWorkspace reports whether data is a valid .code-workspace JSON
+// object whose "folders" list matches the workspace's repositories in order.
+func (w Workspace) ValidCodeWorkspace(data []byte) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil || raw == nil {
+		return false
+	}
+	foldersRaw, ok := raw["folders"]
+	if !ok {
+		return false
+	}
+	var got []CodeWorkspaceFolder
+	if err := json.Unmarshal(foldersRaw, &got); err != nil || got == nil {
+		return false
+	}
+	want := w.CodeWorkspaceFolders()
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i].Path != want[i].Path {
+			return false
+		}
+	}
+	return true
 }

@@ -67,6 +67,7 @@ eval "$(bosk shell-init)"   # add to ~/.zshrc or ~/.bashrc
 ~/.bosk/config.yaml               # scan roots + workspace dir
 ~/.bosk/state.json                # what bosk created
 ~/.bosk/workspaces/feat-login/
+  feat-login.code-workspace       # Cursor / VS Code workspace file
   svc-a/                          # linked worktree
   svc-b/
   shared-lib -> ~/dev/shared-lib  # shared repository: a symlink, not a worktree

@@ -253,8 +253,13 @@ func (r *Remover) RemoveRepos(name string, repoNames []string, opts DeleteOpts) 
 		}
 
 		updated = ws.WithoutRepos(repoNamesOf(removed.Repos)).WithoutShared(sharedNamesOf(removed.Shared))
+		if err := writeCodeWorkspace(r.fs, updated); err != nil {
+			restore()
+			return err
+		}
 		reg.Upsert(updated)
 		if err := r.registry.Save(reg); err != nil {
+			_ = writeCodeWorkspace(r.fs, ws)
 			restore()
 			return err
 		}

@@ -194,3 +194,45 @@ func TestDoctorIgnoresAnAbsentTrashDirectory(t *testing.T) {
 		t.Fatalf("issues = %#v", issues)
 	}
 }
+
+func TestDoctorReportsAMissingCodeWorkspaceFile(t *testing.T) {
+	h := newHarness(t)
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a"}})
+	if err := h.fs.RemoveAll(ws.CodeWorkspacePath()); err != nil {
+		t.Fatal(err)
+	}
+
+	issues, err := h.doctor().Diagnose()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	issue, ok := findIssue(issues, domain.IssueCodeWorkspaceMissing)
+	if !ok {
+		t.Fatalf("issues = %#v", issues)
+	}
+	if !issue.Fixable() || issue.Path != ws.CodeWorkspacePath() {
+		t.Fatalf("issue = %#v", issue)
+	}
+}
+
+func TestDoctorReportsAnOutOfSyncCodeWorkspaceFile(t *testing.T) {
+	h := newHarness(t)
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a", "svc-b"}})
+	if err := h.fs.WriteFile(ws.CodeWorkspacePath(), []byte(`{"folders":[{"path":"svc-a"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	issues, err := h.doctor().Diagnose()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	issue, ok := findIssue(issues, domain.IssueCodeWorkspaceOutOfSync)
+	if !ok {
+		t.Fatalf("issues = %#v", issues)
+	}
+	if !issue.Fixable() || issue.Path != ws.CodeWorkspacePath() {
+		t.Fatalf("issue = %#v", issue)
+	}
+}

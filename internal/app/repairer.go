@@ -45,6 +45,13 @@ func (r *Repairer) Repair(issues []domain.Issue) error {
 			if err := r.relink(issue); err != nil {
 				return err
 			}
+		case domain.IssueCodeWorkspaceMissing, domain.IssueCodeWorkspaceOutOfSync:
+			if dropped[issue.Workspace] {
+				continue
+			}
+			if err := writeCodeWorkspaceFolders(r.fs, issue.Path, issue.Folders); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

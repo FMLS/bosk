@@ -278,6 +278,10 @@ func TestRemoveReposTakesOnlyTheNamedRepos(t *testing.T) {
 	if !h.git.BranchExists("/src/svc-b", "feat/login") {
 		t.Error("the local branch is kept unless asked")
 	}
+	data, err := h.fs.ReadFile(updated.CodeWorkspacePath())
+	if err != nil || !updated.ValidCodeWorkspace(data) {
+		t.Fatalf("code-workspace = %q, %v", data, err)
+	}
 }
 
 func TestRemoveReposDeletesOnlyBranchesBoskCreated(t *testing.T) {
@@ -387,6 +391,52 @@ func TestRemoveReposRestoresTheWorktreeWhenSaveFails(t *testing.T) {
 	}
 	if !h.recorded("worktree-repair /src/svc-b " + wt) {
 		t.Errorf("restore should repair the worktree links, calls = %v", h.git.Calls)
+	}
+	data, err := h.fs.ReadFile(ws.CodeWorkspacePath())
+	if err != nil || !ws.ValidCodeWorkspace(data) {
+		t.Fatalf("code-workspace should be restored to original state: %q, %v", data, err)
+	}
+}
+
+func TestRemoveReposRestoresTheWorktreeWhenCodeWorkspaceWriteFails(t *testing.T) {
+	h := newHarness(t)
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a", "svc-b"}})
+	wt := ws.Repos[1].WorktreePath
+	h.fs.WriteErr[ws.CodeWorkspacePath()] = errors.New("read-only")
+
+	_, _, err := h.remover().RemoveRepos(ws.Name, []string{"svc-b"}, app.DeleteOpts{})
+
+	if err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("error = %v", err)
+	}
+	if !exists(t, h.fs, wt) {
+		t.Error("the worktree should be restored")
+	}
+	stored, _ := h.reg.Registry.Get(ws.Name)
+	if len(stored.Repos) != 2 {
+		t.Errorf("repos = %#v", stored.Repos)
+	}
+}
+
+func TestRemoveReposPreservesCustomFieldsInCodeWorkspace(t *testing.T) {
+	h := newHarness(t)
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a", "svc-b"}})
+	custom := []byte(`{"folders":[{"path":"svc-a"},{"path":"svc-b"}],"settings":{"editor.tabSize":4}}`)
+	if err := h.fs.WriteFile(ws.CodeWorkspacePath(), custom); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, _, err := h.remover().RemoveRepos(ws.Name, []string{"svc-b"}, app.DeleteOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := h.fs.ReadFile(updated.CodeWorkspacePath())
+	if err != nil || !updated.ValidCodeWorkspace(data) {
+		t.Fatalf("code-workspace = %q, %v", data, err)
+	}
+	if !strings.Contains(string(data), `"editor.tabSize": 4`) {
+		t.Errorf("expected custom settings to be preserved, got:\n%s", data)
 	}
 }
 

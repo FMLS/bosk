@@ -38,6 +38,10 @@ func TestCreateProvisionsWorktreesAndRecordsWorkspace(t *testing.T) {
 	if h.reg.Locks == 0 {
 		t.Error("create should hold the registry lock")
 	}
+	data, err := h.fs.ReadFile(ws.CodeWorkspacePath())
+	if err != nil || !ws.ValidCodeWorkspace(data) {
+		t.Fatalf("code-workspace = %q, %v", data, err)
+	}
 }
 
 func TestCreateUsesAnExistingBranchWithoutCreatingIt(t *testing.T) {
@@ -447,12 +451,69 @@ func TestAddRollsBackWhenAddingAWorktreeFails(t *testing.T) {
 func TestAddRollsBackWhenTheRegistrySaveFails(t *testing.T) {
 	h := newHarness(t)
 	withSvcC(h)
-	h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a"}})
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a"}})
 	h.reg.SaveErr = errors.New("disk full")
 
 	_, _, err := h.creator().Add(app.AddOpts{Name: "feat-login", RepoNames: []string{"svc-b", "svc-c"}})
 
 	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("error = %v", err)
+	}
+	assertAddRolledBack(t, h)
+	data, err := h.fs.ReadFile(ws.CodeWorkspacePath())
+	if err != nil || !ws.ValidCodeWorkspace(data) {
+		t.Fatalf("code-workspace should be restored to original state: %q, %v", data, err)
+	}
+}
+
+func TestCreateRollsBackWhenCodeWorkspaceWriteFails(t *testing.T) {
+	h := newHarness(t)
+	h.fs.WriteErr["/ws/feat-login/feat-login.code-workspace"] = errors.New("read-only")
+
+	_, err := h.creator().Create(app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a"}})
+
+	if err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("error = %v", err)
+	}
+	if got := h.git.Worktrees("/src/svc-a"); len(got) != 0 {
+		t.Errorf("worktrees = %v, want them rolled back", got)
+	}
+	if exists(t, h.fs, "/ws/feat-login") {
+		t.Error("workspace directory should be gone")
+	}
+}
+
+func TestAddUpdatesCodeWorkspaceAndPreservesCustomFields(t *testing.T) {
+	h := newHarness(t)
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a"}})
+	custom := []byte(`{"folders":[{"path":"svc-a"}],"settings":{"editor.tabSize":4}}`)
+	if err := h.fs.WriteFile(ws.CodeWorkspacePath(), custom); err != nil {
+		t.Fatal(err)
+	}
+
+	ws, _, err := h.creator().Add(app.AddOpts{Name: "feat-login", RepoNames: []string{"svc-b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := h.fs.ReadFile(ws.CodeWorkspacePath())
+	if err != nil || !ws.ValidCodeWorkspace(data) {
+		t.Fatalf("code-workspace = %q, %v", data, err)
+	}
+	if !strings.Contains(string(data), `"editor.tabSize": 4`) {
+		t.Errorf("expected custom settings to be preserved, got:\n%s", data)
+	}
+}
+
+func TestAddRollsBackWhenCodeWorkspaceWriteFails(t *testing.T) {
+	h := newHarness(t)
+	withSvcC(h)
+	ws := h.mustCreate(t, app.CreateOpts{Branch: "feat/login", RepoNames: []string{"svc-a"}})
+	h.fs.WriteErr[ws.CodeWorkspacePath()] = errors.New("read-only")
+
+	_, _, err := h.creator().Add(app.AddOpts{Name: "feat-login", RepoNames: []string{"svc-b", "svc-c"}})
+
+	if err == nil || !strings.Contains(err.Error(), "read-only") {
 		t.Fatalf("error = %v", err)
 	}
 	assertAddRolledBack(t, h)

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/FMLS/bosk/internal/adapters/git"
@@ -84,6 +85,98 @@ func TestWorktreeAddAndStatus(t *testing.T) {
 	}
 	if err := client.DeleteBranch(repo, "feat/login", true); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// cloneWithOrigin builds a source repository and a clone of it, so the clone
+// has an origin remote and origin/main.
+func cloneWithOrigin(t *testing.T) (origin, repo string) {
+	t.Helper()
+	root := t.TempDir()
+	origin = filepath.Join(root, "origin")
+	repo = filepath.Join(root, "app")
+	testsupport.InitRepo(t, origin)
+	testsupport.RunGit(t, root, "clone", origin, repo)
+	return origin, repo
+}
+
+func TestWorktreeAddNewTracksSameNamedBranch(t *testing.T) {
+	client := realClient()
+	_, repo := cloneWithOrigin(t)
+	wt := filepath.Join(t.TempDir(), "feat")
+
+	if err := client.WorktreeAddNew(repo, wt, "feat/login", "origin/main"); err != nil {
+		t.Fatal(err)
+	}
+
+	remote := strings.TrimSpace(testsupport.RunGit(t, repo, "config", "--get", "branch.feat/login.remote"))
+	merge := strings.TrimSpace(testsupport.RunGit(t, repo, "config", "--get", "branch.feat/login.merge"))
+	if remote != "origin" || merge != "refs/heads/feat/login" {
+		t.Fatalf("upstream = %s %s, want origin refs/heads/feat/login", remote, merge)
+	}
+	status := testsupport.RunGit(t, wt, "status", "--porcelain=v2", "--branch")
+	if !strings.Contains(status, "branch.upstream origin/feat/login") {
+		t.Fatalf("status =\n%s", status)
+	}
+}
+
+func TestWorktreeAddNewUpstreamResolvesWhenRemoteBranchExists(t *testing.T) {
+	client := realClient()
+	origin, repo := cloneWithOrigin(t)
+	testsupport.RunGit(t, origin, "branch", "feat/login")
+	testsupport.RunGit(t, repo, "fetch", "origin")
+	wt := filepath.Join(t.TempDir(), "feat")
+
+	if err := client.WorktreeAddNew(repo, wt, "feat/login", "origin/main"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := strings.TrimSpace(testsupport.RunGit(t, wt, "rev-parse", "--abbrev-ref", "@{upstream}"))
+	if got != "origin/feat/login" {
+		t.Fatalf("upstream = %q, want origin/feat/login", got)
+	}
+}
+
+func TestWorktreeAddNewWithoutOriginLeavesUpstreamUnset(t *testing.T) {
+	client := realClient()
+	root := t.TempDir()
+	repo := filepath.Join(root, "app")
+	testsupport.InitRepo(t, repo)
+	wt := filepath.Join(root, "feat")
+
+	if err := client.WorktreeAddNew(repo, wt, "feat/login", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	status := testsupport.RunGit(t, wt, "status", "--porcelain=v2", "--branch")
+	if strings.Contains(status, "branch.upstream") {
+		t.Fatalf("status =\n%s\nwant no upstream", status)
+	}
+}
+
+func TestWorktreeAddNewRemovesTheWorktreeWhenUpstreamConfigFails(t *testing.T) {
+	runner := testsupport.NewScriptedRunner()
+	runner.Responses["worktree add -b feat/login --no-track -- /wt origin/master"] = ""
+	runner.Responses["remote"] = "origin"
+	runner.Errors["config --local branch.feat/login.remote origin"] = errors.New("disk full")
+	runner.Responses["worktree remove --force -- /wt"] = ""
+	runner.Responses["branch -D feat/login"] = ""
+	client := git.NewClient(runner, pathx.New())
+
+	err := client.WorktreeAddNew("/src/app", "/wt", "feat/login", "origin/master")
+
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("error = %v", err)
+	}
+	want := []string{
+		"worktree add -b feat/login --no-track -- /wt origin/master",
+		"remote",
+		"config --local branch.feat/login.remote origin",
+		"worktree remove --force -- /wt",
+		"branch -D feat/login",
+	}
+	if strings.Join(runner.Calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls =\n%s", strings.Join(runner.Calls, "\n"))
 	}
 }
 

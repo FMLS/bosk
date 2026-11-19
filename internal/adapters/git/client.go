@@ -105,9 +105,54 @@ func (c *Client) WorktreeAdd(repo, path, branch string) error {
 }
 
 // WorktreeAddNew creates a worktree and a new branch from startPoint.
+// The new branch tracks origin/<branch> when that remote exists, not the
+// start point. Git would otherwise treat the start point (often origin/master)
+// as the upstream. The remote branch need not exist yet; the first push
+// creates it. A repository without origin is left with no upstream.
 func (c *Client) WorktreeAddNew(repo, path, branch, startPoint string) error {
-	_, err := c.runner.Run(repo, "worktree", "add", "-b", branch, "--", path, startPoint)
-	return err
+	_, err := c.runner.Run(repo, "worktree", "add", "-b", branch, "--no-track", "--", path, startPoint)
+	if err != nil {
+		return err
+	}
+	if err := c.trackSameName(repo, branch); err != nil {
+		// Drop the worktree we just added so the caller sees no partial branch.
+		_ = c.WorktreeRemove(repo, path, true)
+		_ = c.DeleteBranch(repo, branch, true)
+		return err
+	}
+	return nil
+}
+
+// trackSameName points branch at origin/<branch>. The remote-tracking ref may
+// be absent; push then creates the remote branch and the relationship becomes
+// real. Without an origin remote there is no same-named branch to track.
+func (c *Client) trackSameName(repo, branch string) error {
+	remotes, err := c.runner.Run(repo, "remote")
+	if err != nil {
+		return err
+	}
+	if !remoteListed(remotes, "origin") {
+		return nil
+	}
+	remoteKey := "branch." + branch + ".remote"
+	mergeKey := "branch." + branch + ".merge"
+	if _, err := c.runner.Run(repo, "config", "--local", remoteKey, "origin"); err != nil {
+		return err
+	}
+	if _, err := c.runner.Run(repo, "config", "--local", mergeKey, "refs/heads/"+branch); err != nil {
+		_, _ = c.runner.Run(repo, "config", "--local", "--unset", remoteKey)
+		return err
+	}
+	return nil
+}
+
+func remoteListed(list, name string) bool {
+	for _, line := range strings.Split(list, "\n") {
+		if strings.TrimSpace(line) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // WorktreeRemove unregisters and deletes a worktree directory.

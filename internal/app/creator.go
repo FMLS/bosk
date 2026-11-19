@@ -366,7 +366,8 @@ func (c *Creator) addAll(repos []domain.Repo, wsPath, branch string, rollback *r
 }
 
 // addWorktree checks out branch for one repository, creating the branch from
-// the repo's default start point when it does not exist yet.
+// the repo's default start point when it does not exist yet. A newly created
+// branch tracks origin/<branch> when origin exists, rather than that start point.
 func (c *Creator) addWorktree(repo domain.Repo, wsPath, branch string) (domain.RepoWorktree, error) {
 	inUse, err := c.git.BranchInUse(repo.Path, branch)
 	if err != nil {
